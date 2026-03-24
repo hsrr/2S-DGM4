@@ -318,6 +318,12 @@ def main_worker(gpu, args, config):
 
     init_dist(args)
 
+    # Keep model architecture unchanged; disable non-class GT-supervised losses.
+    # Specifically: bbox regression (L1/GIoU) and fake-text-position token loss.
+    config['loss_bbox_wgt'] = 0.0
+    config['loss_giou_wgt'] = 0.0
+    config['loss_TMG_wgt'] = 0.0
+
     log_dir = os.path.join(args.output_dir, 'log'+ args.log_num)
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'shell.txt')
@@ -351,6 +357,7 @@ def main_worker(gpu, args, config):
     warmup_steps = config['schedular']['warmup_epochs']  
     best = 0
     best_epoch = 0  
+    no_improve_epochs = 0
 
     #### Dataset #### 
     if args.log:
@@ -445,6 +452,15 @@ def main_worker(gpu, args, config):
                      "F1_tok": "{:.4f}".format(F1_tok*100),
         }
         
+        current_f1_tok = float(val_stats['F1_tok'])
+        is_best = current_f1_tok > best
+        if is_best:
+            best = current_f1_tok
+            best_epoch = epoch
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
+
         if utils.is_main_process(): 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                             **{f'val_{k}': v for k, v in val_stats.items()},
@@ -471,13 +487,23 @@ def main_worker(gpu, args, config):
                 }                    
             if (epoch % args.model_save_epoch == 0 and epoch!=0):
                 torch.save(save_obj, os.path.join(log_dir, 'checkpoint_%02d.pth'%epoch)) 
-            if float(val_stats['F1_tok'])>best:
+            if is_best:
                 torch.save(save_obj, os.path.join(log_dir, 'checkpoint_best.pth')) 
-                best = float(val_stats['F1_tok'])
-                best_epoch = epoch
 
         if config['schedular']['sched'] != 'cosine_in_step':
             lr_scheduler.step(epoch+warmup_steps+1)  
+
+        should_stop = no_improve_epochs >= args.early_stop_patience
+        if args.distributed:
+            stop_tensor = torch.tensor(int(should_stop), device=device)
+            dist.all_reduce(stop_tensor, op=dist.ReduceOp.MAX)
+            should_stop = bool(stop_tensor.item())
+
+        if should_stop:
+            if utils.is_main_process() and args.log:
+                print(f"Early stopping at epoch {epoch} (best epoch: {best_epoch}, best F1_tok: {best:.4f})")
+            break
+
         dist.barrier() 
 
     if utils.is_main_process():
@@ -512,6 +538,7 @@ if __name__ == '__main__':
                         help='job launcher')
     parser.add_argument('--log_num', '-l', type=str)
     parser.add_argument('--model_save_epoch', type=int, default=20)
+    parser.add_argument('--early_stop_patience', type=int, default=3)
     parser.add_argument('--token_momentum', default=False, action='store_true')
 
     '''Swin Transformer backbone loading'''
