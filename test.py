@@ -37,6 +37,7 @@ from tqdm import tqdm
 
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import roc_curve
+from sklearn.metrics import f1_score
 from scipy.optimize import brentq
 from scipy.interpolate import interp1d
 
@@ -117,7 +118,7 @@ def evaluation(args, model, data_loader, tokenizer, device, config):
     print('Computing features for evaluation...')
     print_freq = 200 
 
-    y_true, y_pred, IOU_pred, IOU_50, IOU_75, IOU_95 = [], [], [], [], [], []
+    y_true, y_score, y_pred, IOU_pred, IOU_50, IOU_75, IOU_95 = [], [], [], [], [], [], []
     cls_nums_all = 0
     cls_acc_all = 0   
 
@@ -145,16 +146,51 @@ def evaluation(args, model, data_loader, tokenizer, device, config):
 
         logits_fake_Face, logits_fake_Text, logits_fake_Com, output_coord, logits_tok = model(image, label, text_input, fake_image_box, fake_token_pos, is_train=False)
 
-        ##================= real/fake cls ========================## 
-        # cls_label = torch.ones(len(label), dtype=torch.long).to(image.device) 
-        # real_label_pos = np.where(np.array(label) == 'orig')[0].tolist()
-        # cls_label[real_label_pos] = 0
+        ##================= real/fake cls ========================##
+        label_np = np.array(label)
+        cls_label = (label_np != 'orig').astype(np.int64)
 
-        # pred_acc = logits_real_fake.argmax(1)
-        # cls_nums_all += cls_label.shape[0]
-        
-        # ----- multiple labels -----
-        # target, _ = get_multi_label(label, image)
+        prob_face = F.softmax(logits_fake_Face, dim=1)
+        prob_text = F.softmax(logits_fake_Text, dim=1)
+        prob_com = F.softmax(logits_fake_Com, dim=1)
+
+        # Merge three branches into binary real/fake probability.
+        # "real" means all branches predict class-0 (no manipulation).
+        prob_real = prob_face[:, 0] * prob_text[:, 0] * prob_com[:, 0]
+        prob_fake = 1 - prob_real
+
+        y_true.extend(cls_label.tolist())
+        y_score.extend(prob_fake.detach().cpu().tolist())
+        y_pred_batch = (prob_fake >= 0.5).long()
+        y_pred.extend(y_pred_batch.detach().cpu().tolist())
+        cls_nums_all += len(label)
+        cls_acc_all += int((y_pred_batch.cpu().numpy() == cls_label).sum())
+
+        ##================= multi-label cls ========================##
+        # 4-label target: [face_swap, face_attribute, text_swap, text_attribute]
+        target = torch.zeros((len(label), 4), dtype=torch.long)
+        for idx, lb in enumerate(label):
+            if lb in {'face_swap', 'face_swap&text_swap', 'face_swap&text_attribute'}:
+                target[idx, 0] = 1
+            if lb in {'face_attribute', 'face_attribute&text_swap', 'face_attribute&text_attribute'}:
+                target[idx, 1] = 1
+            if lb in {'text_swap', 'face_swap&text_swap', 'face_attribute&text_swap'}:
+                target[idx, 2] = 1
+            if lb in {'text_attribute', 'face_swap&text_attribute', 'face_attribute&text_attribute'}:
+                target[idx, 3] = 1
+
+        # Combine direct branch scores with compositional branch evidence.
+        p_fsts = prob_com[:, 1]
+        p_fsta = prob_com[:, 2]
+        p_fats = prob_com[:, 3]
+        p_fata = prob_com[:, 4]
+        p_fs = 1 - (1 - prob_face[:, 1]) * (1 - (p_fsts + p_fsta))
+        p_fa = 1 - (1 - prob_face[:, 2]) * (1 - (p_fats + p_fata))
+        p_ts = 1 - (1 - prob_text[:, 1]) * (1 - (p_fsts + p_fats))
+        p_ta = 1 - (1 - prob_text[:, 2]) * (1 - (p_fsta + p_fata))
+        multi_score = torch.stack([p_fs, p_fa, p_ts, p_ta], dim=1)
+        # The legacy meter treats score>=0 as positive; shift to center threshold at 0.5.
+        multi_label_meter.add((multi_score - 0.5).detach().cpu(), target.detach().cpu())
         
         ##================= bbox cls ========================## 
         boxes1 = box_ops.box_cxcywh_to_xyxy(output_coord)
@@ -220,8 +256,33 @@ def evaluation(args, model, data_loader, tokenizer, device, config):
         FP_all += torch.sum((token_label_reshape == 0) * (logits_tok_pred == 1)).item()
         FN_all += torch.sum((token_label_reshape == 1) * (logits_tok_pred == 0)).item()
                  
-    ##================= real/fake cls ========================## 
-    # ACC_cls = cls_acc_all / cls_nums_all
+    ##================= real/fake cls ========================##
+    y_true = np.array(y_true)
+    y_score = np.array(y_score)
+    y_pred = np.array(y_pred)
+
+    ACC_cls = cls_acc_all / cls_nums_all if cls_nums_all else 0.0
+    F1_cls = f1_score(y_true, y_pred, zero_division=0) if y_true.size else 0.0
+    if np.unique(y_true).size > 1:
+        AUC_cls = roc_auc_score(y_true, y_score)
+        fpr, tpr, _ = roc_curve(y_true, y_score, pos_label=1)
+        if len(fpr) > 1:
+            EER_cls = brentq(lambda x: 1. - x - interp1d(fpr, tpr)(x), 0., 1.)
+        else:
+            EER_cls = 0.0
+    else:
+        AUC_cls = 0.0
+        EER_cls = 0.0
+
+    ##================= multi-label cls ========================##
+    ap_value = multi_label_meter.value()
+    MAP = ap_value.mean().item() if torch.is_tensor(ap_value) else float(ap_value)
+    overall_metrics = multi_label_meter.overall()
+    if isinstance(overall_metrics, tuple):
+        _, _, OF1, _, _, CF1 = overall_metrics
+    else:
+        OF1, CF1 = 0.0, 0.0
+
     ##================= bbox cls ========================##
     IOU_score = sum(IOU_pred)/len(IOU_pred)
     IOU_ACC_50 = sum(IOU_50)/len(IOU_50)
@@ -235,7 +296,8 @@ def evaluation(args, model, data_loader, tokenizer, device, config):
     ##================= multi-label cls ========================##
     # OP, OR, OF1, CP, CR, CF1 = our_multi_modify(, target)
     
-    return IOU_score, IOU_ACC_50, IOU_ACC_75, IOU_ACC_95, \
+    return ACC_cls, F1_cls, AUC_cls, EER_cls, MAP, CF1, OF1, \
+        IOU_score, IOU_ACC_50, IOU_ACC_75, IOU_ACC_95, \
         ACC_tok, Precision_tok, Recall_tok, F1_tok
     
 def main_worker(gpu, args, config):
@@ -320,10 +382,18 @@ def main_worker(gpu, args, config):
         print("Start evaluation")
 
 
+    ACC_cls, F1_cls, AUC_cls, EER_cls, MAP, CF1, OF1, \
     IOU_score, IOU_ACC_50, IOU_ACC_75, IOU_ACC_95, \
-    ACC_tok, Precision_tok, Recall_tok, F1_tok  = evaluation(args, model_without_ddp, val_loader, tokenizer, device, config)
+    ACC_tok, Precision_tok, Recall_tok, F1_tok = evaluation(args, model_without_ddp, val_loader, tokenizer, device, config)
     #============ evaluation info ============#
     val_stats = {
+                    "ACC_cls": "{:.4f}".format(ACC_cls*100),
+                    "F1_cls": "{:.4f}".format(F1_cls*100),
+                    "AUC_cls": "{:.4f}".format(AUC_cls*100),
+                    "EER_cls": "{:.4f}".format(EER_cls*100),
+                    "MAP": "{:.4f}".format(MAP*100),
+                    "CF1": "{:.4f}".format(CF1*100),
+                    "OF1": "{:.4f}".format(OF1*100),
                     "IOU_score": "{:.4f}".format(IOU_score*100),
                     "IOU_ACC_50": "{:.4f}".format(IOU_ACC_50*100),
                     "IOU_ACC_75": "{:.4f}".format(IOU_ACC_75*100),
