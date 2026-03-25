@@ -50,6 +50,27 @@ from models.HAMMER import HAMMER
 def zero_in_list(lst):
     return any(x == 0 for x in lst)
 
+def resolve_text_encoder_path(text_encoder):
+    """Prefer local model paths to support offline evaluation."""
+    candidates = [text_encoder]
+    if text_encoder == 'bert-base-uncased':
+        cwd = os.getcwd()
+        candidates.extend([
+            os.path.join(cwd, 'plm', 'bert-base-uncased'),
+            os.path.abspath(os.path.join(cwd, '..', 'plm', 'bert-base-uncased')),
+            os.path.abspath(os.path.join(cwd, '..', '..', 'plm', 'bert-base-uncased')),
+            '/plm/bert-base-uncased',
+        ])
+
+    seen = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if os.path.isdir(path):
+            return path
+    return text_encoder
+
 def setlogger(log_file):
     filehandler = logging.FileHandler(log_file)
     streamhandler = logging.StreamHandler()
@@ -340,7 +361,15 @@ def main_worker(gpu, args, config):
 
 
     #### Model #### 
-    tokenizer = BertTokenizerFast.from_pretrained(args.text_encoder)
+    args.text_encoder = resolve_text_encoder_path(args.text_encoder)
+    try:
+        tokenizer = BertTokenizerFast.from_pretrained(args.text_encoder, local_files_only=True)
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to load text encoder tokenizer in offline mode. "
+            f"Resolved path/name: {args.text_encoder}. "
+            "Please pass a valid local path, e.g. --text_encoder ../../plm/bert-base-uncased"
+        ) from e
     if args.log:
         print(f"Creating MAMMER")
     model = HAMMER(args=args, config=config, text_encoder=args.text_encoder, tokenizer=tokenizer, init_deit=True)
