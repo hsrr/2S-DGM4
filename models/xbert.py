@@ -19,6 +19,7 @@ import math
 import os
 import warnings
 from dataclasses import dataclass
+from inspect import Parameter, signature
 from typing import Optional, Tuple
 
 import torch
@@ -31,7 +32,7 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.file_utils import (
     ModelOutput,
-    add_code_sample_docstrings,
+    add_code_sample_docstrings as _hf_add_code_sample_docstrings,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     replace_return_docstrings,
@@ -60,6 +61,24 @@ import transformers
 transformers.logging.set_verbosity_error()
 
 logger = logging.get_logger(__name__)
+
+
+def add_code_sample_docstrings(*docstr, **kwargs):
+    """Compatibility wrapper across transformers versions.
+
+    Some newer/older transformers releases changed supported keyword arguments
+    (e.g. removed `tokenizer_class`). Filter unknown kwargs so imports don't fail.
+    """
+    try:
+        sig = signature(_hf_add_code_sample_docstrings)
+        accepts_var_kwargs = any(p.kind == Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if accepts_var_kwargs:
+            return _hf_add_code_sample_docstrings(*docstr, **kwargs)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return _hf_add_code_sample_docstrings(*docstr, **filtered_kwargs)
+    except Exception:
+        kwargs.pop("tokenizer_class", None)
+        return _hf_add_code_sample_docstrings(*docstr, **kwargs)
 
 _CONFIG_FOR_DOC = "BertConfig"
 _TOKENIZER_FOR_DOC = "BertTokenizer"
