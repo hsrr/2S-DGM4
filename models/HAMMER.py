@@ -5,6 +5,7 @@ from models.xbert import BertConfig, BertForMaskedLM, BertForTokenClassification
 import torch
 import torch.nn.functional as F
 from torch import nn
+import os
 
 import numpy as np
 import random
@@ -59,22 +60,26 @@ class HAMMER(nn.Module):
         self.shareSwin_model = SwinForAffwildClassification(args)
         '''loading the pretrained SWIN (Swin Transformer) model and updating the parameter dictionary.'''
         if init_deit:
-                model_dict = self.shareSwin_model.state_dict()
-                pretrained_dict = torch.load(args.pretrained_backbone_path, map_location="cpu")['state_dict']
-                new_pretrained_dict = {}
-                for k in model_dict:
-                    if k in pretrained_dict:
-                        if k == 'classifier.weight':
-                            continue
-                        if k == 'classifier.bias':
-                            continue
-                        if k[:5] == 'swin.':
-                            k_val = k[5:]
-                        else:
-                            k_val = k
-                        new_pretrained_dict[k] = pretrained_dict['backbone.' + k_val] # tradition training
-                model_dict.update(new_pretrained_dict)
-                self.shareSwin_model.load_state_dict(model_dict)
+                sw_pretrained_path = getattr(args, 'pretrained_backbone_path', None)
+                if sw_pretrained_path and os.path.isfile(sw_pretrained_path):
+                    model_dict = self.shareSwin_model.state_dict()
+                    pretrained_dict = torch.load(sw_pretrained_path, map_location="cpu")['state_dict']
+                    new_pretrained_dict = {}
+                    for k in model_dict:
+                        if k in pretrained_dict:
+                            if k == 'classifier.weight':
+                                continue
+                            if k == 'classifier.bias':
+                                continue
+                            if k[:5] == 'swin.':
+                                k_val = k[5:]
+                            else:
+                                k_val = k
+                            new_pretrained_dict[k] = pretrained_dict['backbone.' + k_val] # tradition training
+                    model_dict.update(new_pretrained_dict)
+                    self.shareSwin_model.load_state_dict(model_dict)
+                else:
+                    print(f"Skip loading Swin pretrained backbone: {sw_pretrained_path}")
 
         # creat itm head
         self.itm_head_F = self.build_mlp(input_dim=text_width, output_dim=3)
