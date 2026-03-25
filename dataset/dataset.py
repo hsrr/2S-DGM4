@@ -18,13 +18,43 @@ import math
 import random
 from random import random as rand
 
+def _load_annotation_file(path):
+    """Load annotation file in JSON list or JSONL format."""
+    with open(path, 'r', encoding='utf-8') as fp:
+        content = fp.read().strip()
+    if not content:
+        return []
+
+    # Try standard JSON first (e.g., list[dict]).
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            # Be permissive for wrapped payload formats.
+            for key in ("data", "annotations", "items"):
+                if key in parsed and isinstance(parsed[key], list):
+                    return parsed[key]
+            return [parsed]
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback to JSONL: one json object per line.
+    records = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    return records
+
 class DGM4_Dataset(Dataset):
     def __init__(self, config, ann_file, transform, max_words=30, is_train=True): 
         
         self.root_dir = '../../datasets'
         self.ann = []
         for f in ann_file:
-            self.ann += json.load(open(f,'r'))
+            self.ann += _load_annotation_file(f)
         if 'dataset_division' in config:
             self.ann = self.ann[:int(len(self.ann)/config['dataset_division'])]
 
