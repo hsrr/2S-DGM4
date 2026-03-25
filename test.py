@@ -490,4 +490,11 @@ if __name__ == '__main__':
         )
     config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
  
-    main_worker(0, args, config)
+    if args.launcher == 'none':
+        # Keep backward-compatible single-process execution.
+        main_worker(0, args, config)
+    else:
+        args.distributed = True
+        ngpus_per_node = torch.cuda.device_count()
+        args.ngpus_per_node = ngpus_per_node
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(args, config))
