@@ -305,7 +305,13 @@ def main_worker(gpu, args, config):
     if gpu is not None:
         args.gpu = gpu
 
-    init_dist(args)
+    if args.distributed:
+        init_dist(args)
+    else:
+        # Single-process eval path: skip distributed init.
+        args.rank = 0
+        args.world_size = 1
+        args.log = True
 
     eval_type = os.path.basename(config['val_file'][0]).split('.')[0]
     if eval_type == 'test':
