@@ -414,7 +414,7 @@ def main_worker(gpu, args, config):
  
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='./configs/Pretrain.yaml')
+    parser.add_argument('--config', default='./configs/test.yaml')
     parser.add_argument('--checkpoint', default='') 
     parser.add_argument('--resume', default=False, type=bool)
     parser.add_argument('--output_dir', default='/mnt/lustre/share/rshao/data/FakeNews/Ours/results')
@@ -448,6 +448,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    if not os.path.exists(args.config):
+        raise FileNotFoundError(
+            f"Config not found: {args.config}. "
+            f"Try --config configs/test.yaml"
+        )
     config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
  
     main_worker(0, args, config)
